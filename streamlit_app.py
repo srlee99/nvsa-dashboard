@@ -21,6 +21,7 @@ import urllib.parse
 from datetime import datetime
 
 import altair as alt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -269,6 +270,59 @@ def build_daily(nv: pd.DataFrame, lg: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def build_dim2(nv: pd.DataFrame, lg: pd.DataFrame) -> pd.DataFrame:
+    """일자×기기×랜딩×캠페인×그룹 마스터.
+    비용·클릭·노출·순위 = 네이버(정확). 방문·유입 = 로거를 (날짜·기기·랜딩) 그룹 내
+    비용 비례로 캠페인/그룹에 배분 → 합계는 로거 원본과 일치, 캠페인/그룹 필터 가능.
+    """
+    if nv.empty:
+        return pd.DataFrame()
+    nkeys = ["날짜", "기기", "랜딩", "캠페인명", "광고그룹명"]
+    n = nv.assign(_rw=nv["평균노출순위"] * nv["노출수"]).groupby(nkeys, as_index=False).agg(
+        비용=("총비용", "sum"), 클릭=("클릭수", "sum"), 노출=("노출수", "sum"), rankw=("_rw", "sum"))
+    key = ["날짜", "기기", "랜딩"]
+    if not lg.empty:
+        l = lg.groupby(key, as_index=False).agg(방문=("방문", "sum"), 유입=("유입", "sum"))
+        n["_gc"] = n.groupby(key)["비용"].transform("sum")
+        n["_cnt"] = n.groupby(key)["비용"].transform("size")
+        n = n.merge(l, on=key, how="left")
+        n[["방문", "유입"]] = n[["방문", "유입"]].fillna(0)
+        # 비용 점유율(비용 0이면 균등 배분)
+        share = np.where(n["_gc"] > 0, n["비용"] / n["_gc"].replace(0, np.nan), 1.0 / n["_cnt"])
+        share = pd.Series(share, index=n.index).fillna(0)
+        n["방문"] = n["방문"] * share
+        n["유입"] = n["유입"] * share
+        n = n.drop(columns=["_gc", "_cnt"])
+        # 네이버 지출행이 없는 (날짜·기기·랜딩) 로거 전환은 '(미매핑)'으로 회수 → 합계 보존
+        miss = l.merge(n[key].drop_duplicates().assign(_p=1), on=key, how="left")
+        miss = miss[miss["_p"].isna()]
+        if not miss.empty:
+            add = miss[key + ["방문", "유입"]].copy()
+            add["캠페인명"] = "(미매핑)"
+            add["광고그룹명"] = "(미매핑)"
+            for c in ["비용", "클릭", "노출", "rankw"]:
+                add[c] = 0.0
+            n = pd.concat([n, add[n.columns]], ignore_index=True)
+    else:
+        n["방문"] = 0.0
+        n["유입"] = 0.0
+    return n
+
+
+def daily_from_dim(d: pd.DataFrame) -> pd.DataFrame:
+    """dim2(필터 적용본) → 일자별 집계 + 파생지표."""
+    if d.empty:
+        return pd.DataFrame()
+    g = d.groupby("날짜", as_index=False).agg(
+        비용=("비용", "sum"), 클릭=("클릭", "sum"), 노출=("노출", "sum"),
+        rankw=("rankw", "sum"), 방문=("방문", "sum"), 유입=("유입", "sum"))
+    g["평균순위"] = (g["rankw"] / g["노출"].replace(0, float("nan"))).round(2)
+    g["유입단가"] = (g["비용"] / g["유입"].replace(0, float("nan"))).round(0)
+    g["방문단가"] = (g["비용"] / g["방문"].replace(0, float("nan"))).round(0)
+    g["CTR"] = (g["클릭"] / g["노출"].replace(0, float("nan")) * 100).round(2)
+    return g.sort_values("날짜")
+
+
 def filt(df: pd.DataFrame, cols=("기기", "랜딩")) -> pd.DataFrame:
     if df.empty:
         return df
@@ -317,12 +371,12 @@ with st.sidebar:
     sel_dev = st.multiselect("기기", devs, default=devs)
     lands = sorted(set(nv_raw["랜딩"]) | set(lg_daily["랜딩"] if not lg_daily.empty else []))
     sel_land = st.multiselect("랜딩", lands, default=lands)
-    st.caption("↑ 기기·랜딩은 KPI/추세/키워드 모두 적용")
     camps = sorted(nv_raw["캠페인명"].dropna().unique())
-    sel_camp = st.multiselect("캠페인 (키워드탭)", camps, default=[])
+    sel_camp = st.multiselect("캠페인", camps, default=[])
     grp_pool = nv_raw[nv_raw["캠페인명"].isin(sel_camp)] if sel_camp else nv_raw
-    sel_grp = st.multiselect("광고그룹 (키워드탭)", sorted(grp_pool["광고그룹명"].dropna().unique()), default=[])
-    st.caption("캠페인/그룹은 ④키워드 탭에만 적용 (로거는 캠페인 구분 없음)")
+    sel_grp = st.multiselect("광고그룹", sorted(grp_pool["광고그룹명"].dropna().unique()), default=[])
+    st.caption("필터는 인사이트·KPI·추세·조치·키워드 전체 적용 (미선택=전체). "
+               "방문·유입은 캠페인/그룹 필터 시 비용비례 배분(추정).")
 
     st.divider()
     dry = str(config.get("DRY_RUN", "?")).upper()
@@ -335,13 +389,17 @@ with st.sidebar:
     st.caption(f"MIN {config.get('MIN_BID','?')} · MAX {config.get('MAX_BID','?')} · "
                f"변화상한 {config.get('MAX_CHANGE_PCT','?')}%")
 
-# 필터 적용본
-nvf = filt(nv_raw)                       # KPI/추세용 (기기·랜딩)
-lgf = filt(lg_daily)
-daily = build_daily(nvf, lgf)
+# 필터 적용본 — dim2(캠페인 배분 마스터)에 기기·랜딩·캠페인·그룹 전부 적용
+dim2 = build_dim2(nv_raw, lg_daily)
+FULLCOLS = ("기기", "랜딩", "캠페인명", "광고그룹명")
+dim2f = filt(dim2, cols=FULLCOLS)
 if date_range and len(date_range) == 2:
     lo, hi = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
-    daily = daily[(daily["날짜"] >= lo) & (daily["날짜"] <= hi)]
+    dim2f_range = dim2f[(dim2f["날짜"] >= lo) & (dim2f["날짜"] <= hi)]
+else:
+    dim2f_range = dim2f
+daily = daily_from_dim(dim2f_range)
+nvf = filt(nv_raw, cols=FULLCOLS)         # 키워드/랜딩 세부용
 
 # =============================================================================
 # 헤더 & 신선도
@@ -490,6 +548,8 @@ with tab_now:
         notes.append(f"비용/클릭 = 네이버 {n14_date.date()} 14시")
     if not same_day:
         notes.append("⚠️ 네이버 당일 14시 수집 전이라 비용·유입 날짜가 달라 유입단가는 14시 이후 계산")
+    if sel_camp or sel_grp:
+        notes.append("ℹ️ 진행중은 기기·랜딩 기준(캠페인/그룹 필터는 확정 데이터에만 적용)")
     st.caption(" · ".join(notes) + " · 진행중(정확도: 각 시점 누적 기준)")
 
     st.divider()
@@ -523,42 +583,98 @@ with tab_now:
 # ② 추세
 # =============================================================================
 with tab_trend:
-    if len(daily) >= 2:
-        d = daily.copy()
-        d["날짜"] = d["날짜"].dt.strftime("%m-%d")
-        r1 = st.columns(2)
-        with r1[0]:
-            st.markdown("**비용 & 유입**")
-            base = alt.Chart(d).encode(x=alt.X("날짜:O", title=None))
-            st.altair_chart(alt.layer(
-                base.mark_bar(color="#c7d2fe").encode(y=alt.Y("비용:Q", title="비용(원)")),
-                base.mark_line(point=True, color="#4f46e5").encode(y=alt.Y("유입:Q", title="유입")),
-            ).resolve_scale(y="independent").properties(height=240), width="stretch")
-            st.caption("얼마 써서 유입(전환) 몇 건 나왔나")
-        with r1[1]:
-            st.markdown("**유입단가 추세 (비용÷유입, 낮을수록 좋음)**")
-            st.altair_chart(alt.Chart(d).mark_line(point=True, color="#dc2626").encode(
-                x=alt.X("날짜:O", title=None), y=alt.Y("유입단가:Q", title="유입단가(원)"),
-                tooltip=["날짜", "유입단가"]).properties(height=240), width="stretch")
-            st.caption("유입 1건 만드는 데 든 비용 — 핵심 효율 지표")
-        r2 = st.columns(2)
-        with r2[0]:
-            st.markdown("**방문 & 방문단가 (비용÷방문)**")
-            base = alt.Chart(d).encode(x=alt.X("날짜:O", title=None))
-            st.altair_chart(alt.layer(
-                base.mark_bar(color="#bbf7d0").encode(y=alt.Y("방문:Q", title="방문")),
-                base.mark_line(point=True, color="#059669").encode(y=alt.Y("방문단가:Q", title="방문단가(원)")),
-            ).resolve_scale(y="independent").properties(height=240), width="stretch")
-            st.caption("방문 볼륨과 방문 획득 효율 — 유입단가의 선행지표(방문이 유입보다 자주 발생)")
-        with r2[1]:
-            st.markdown("**평균 노출순위 (낮을수록 상위)**")
-            st.altair_chart(alt.Chart(d).mark_line(point=True, color="#ea580c").encode(
-                x=alt.X("날짜:O", title=None),
-                y=alt.Y("평균순위:Q", title="순위", scale=alt.Scale(reverse=True)),
-                tooltip=["날짜", "평균순위"]).properties(height=240), width="stretch")
-        st.caption("비용/클릭/순위=네이버RAW · 방문/유입=로거RAW · 정확도: 정확")
+    if dim2f_range.empty:
+        st.info("표시할 데이터가 없습니다. 필터를 확인하세요.")
     else:
-        st.info("추세를 그리려면 2일 이상 데이터가 필요합니다.")
+        DIM_LABEL = {"캠페인명": "캠페인", "광고그룹명": "광고그룹", "랜딩": "랜딩"}
+        # ── ① 기준별 비교 (선택 기간 합계) ──
+        st.markdown("##### 📊 기준별 성과 비교 (선택 기간 합계)")
+        cL, cR = st.columns([1, 3])
+        dimsel = cL.radio("비교 기준", list(DIM_LABEL), format_func=lambda x: DIM_LABEL[x])
+        metsel = cL.selectbox("일자별 추세 지표", ["유입단가", "비용", "유입", "방문단가"])
+        label = DIM_LABEL[dimsel]
+        agg = dim2f_range.groupby(dimsel, as_index=False).agg(
+            비용=("비용", "sum"), 클릭=("클릭", "sum"), 노출=("노출", "sum"),
+            방문=("방문", "sum"), 유입=("유입", "sum"))
+        agg["유입단가"] = (agg["비용"] / agg["유입"].replace(0, float("nan"))).round(0)
+        agg["방문단가"] = (agg["비용"] / agg["방문"].replace(0, float("nan"))).round(0)
+        agg = agg.sort_values("비용", ascending=False).head(12)
+        yax = alt.Y(f"{dimsel}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=220))
+        with cR:
+            st.altair_chart(alt.Chart(agg).mark_bar(color="#4f46e5").encode(
+                y=yax, x=alt.X("비용:Q", title="비용(원)"),
+                tooltip=[dimsel, "비용", "유입", "유입단가"]
+            ).properties(height=max(170, len(agg) * 28)), width="stretch")
+        b1, b2 = st.columns(2)
+        with b1:
+            st.markdown("**유입 (건)**")
+            st.altair_chart(alt.Chart(agg).mark_bar(color="#059669").encode(
+                y=alt.Y(f"{dimsel}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=180)),
+                x=alt.X("유입:Q"), tooltip=[dimsel, "유입"]
+            ).properties(height=max(150, len(agg) * 24)), width="stretch")
+        with b2:
+            st.markdown("**유입단가 (원, 낮을수록 좋음)**")
+            st.altair_chart(alt.Chart(agg[agg["유입단가"].notna()]).mark_bar(color="#dc2626").encode(
+                y=alt.Y(f"{dimsel}:N", sort="x", title=None, axis=alt.Axis(labelLimit=180)),
+                x=alt.X("유입단가:Q"), tooltip=[dimsel, "유입단가"]
+            ).properties(height=max(150, len(agg) * 24)), width="stretch")
+        st.caption(f"상위 12개 {label} · 비용/순위=네이버RAW · 방문/유입=로거(캠페인/그룹은 비용비례 배분·추정)")
+
+        st.divider()
+        # ── ② 일자별 (기준별 멀티라인) ──
+        st.markdown(f"##### 📈 일자별 {metsel} — {label} 상위 6 비교")
+        top_dims = agg.head(6)[dimsel].tolist()
+        dd = dim2f_range[dim2f_range[dimsel].isin(top_dims)].groupby(
+            ["날짜", dimsel], as_index=False).agg(
+            비용=("비용", "sum"), 방문=("방문", "sum"), 유입=("유입", "sum"))
+        dd["유입단가"] = (dd["비용"] / dd["유입"].replace(0, float("nan"))).round(0)
+        dd["방문단가"] = (dd["비용"] / dd["방문"].replace(0, float("nan"))).round(0)
+        dd["d"] = dd["날짜"].dt.strftime("%m-%d")
+        rev = (metsel in ("유입단가", "방문단가"))
+        st.altair_chart(alt.Chart(dd).mark_line(point=True).encode(
+            x=alt.X("d:O", title=None),
+            y=alt.Y(f"{metsel}:Q", title=metsel,
+                    scale=alt.Scale(reverse=False)),
+            color=alt.Color(f"{dimsel}:N", title=label, legend=alt.Legend(orient="bottom")),
+            tooltip=["d", dimsel, metsel]).properties(height=320), width="stretch")
+        st.caption(f"{label}별 일자 추세 · {metsel}" + (" (낮을수록 좋음)" if rev else ""))
+
+        st.divider()
+        # ── ③ 전체 합계 일자별 추세 ──
+        st.markdown("##### 📉 전체 합계 일자별 추세 (현재 필터)")
+        if len(daily) >= 2:
+            d = daily.copy()
+            d["날짜"] = d["날짜"].dt.strftime("%m-%d")
+            r1 = st.columns(2)
+            with r1[0]:
+                st.markdown("**비용 & 유입**")
+                base = alt.Chart(d).encode(x=alt.X("날짜:O", title=None))
+                st.altair_chart(alt.layer(
+                    base.mark_bar(color="#c7d2fe").encode(y=alt.Y("비용:Q", title="비용(원)")),
+                    base.mark_line(point=True, color="#4f46e5").encode(y=alt.Y("유입:Q", title="유입")),
+                ).resolve_scale(y="independent").properties(height=240), width="stretch")
+            with r1[1]:
+                st.markdown("**유입단가 추세 (비용÷유입, 낮을수록 좋음)**")
+                st.altair_chart(alt.Chart(d).mark_line(point=True, color="#dc2626").encode(
+                    x=alt.X("날짜:O", title=None), y=alt.Y("유입단가:Q", title="유입단가(원)"),
+                    tooltip=["날짜", "유입단가"]).properties(height=240), width="stretch")
+            r2 = st.columns(2)
+            with r2[0]:
+                st.markdown("**방문 & 방문단가 (비용÷방문)**")
+                base = alt.Chart(d).encode(x=alt.X("날짜:O", title=None))
+                st.altair_chart(alt.layer(
+                    base.mark_bar(color="#bbf7d0").encode(y=alt.Y("방문:Q", title="방문")),
+                    base.mark_line(point=True, color="#059669").encode(y=alt.Y("방문단가:Q", title="방문단가(원)")),
+                ).resolve_scale(y="independent").properties(height=240), width="stretch")
+                st.caption("방문은 유입보다 자주 발생 → 방문단가는 유입단가의 선행지표")
+            with r2[1]:
+                st.markdown("**평균 노출순위 (낮을수록 상위)**")
+                st.altair_chart(alt.Chart(d).mark_line(point=True, color="#ea580c").encode(
+                    x=alt.X("날짜:O", title=None),
+                    y=alt.Y("평균순위:Q", title="순위", scale=alt.Scale(reverse=True)),
+                    tooltip=["날짜", "평균순위"]).properties(height=240), width="stretch")
+        else:
+            st.info("전체 추세는 2일 이상 데이터가 필요합니다.")
 
 
 # =============================================================================
