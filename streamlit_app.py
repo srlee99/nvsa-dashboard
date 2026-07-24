@@ -421,10 +421,14 @@ def _won(v):
     return "-" if v is None or pd.isna(v) else f"₩{v:,.0f}"
 
 
+def _b2h(s):  # **bold** → <b>
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+
+
 with st.container(border=True):
-    st.markdown("#### 💡 인사이트 & 요약")
     bullets = []
     base_dates = ""
+    comment = ""
     if not daily.empty:
         last = daily.iloc[-1]
         prev = daily.iloc[-2] if len(daily) >= 2 else None
@@ -435,9 +439,15 @@ with st.container(border=True):
         if prev is not None and not pd.isna(last["유입단가"]) and not pd.isna(prev["유입단가"]) and prev["유입단가"]:
             dc = (last["유입단가"] - prev["유입단가"]) / prev["유입단가"] * 100
             emoji, word = ("🟢", "개선") if dc < 0 else ("🔴", "상승")
-            bullets.append(f"{emoji} **유입단가 {_won(last['유입단가'])}** ({ld} 기준) — "
-                           f"{pdt} 대비 {abs(dc):.0f}% {word} "
-                           f"({pdt} {_won(prev['유입단가'])} → {ld} {_won(last['유입단가'])})")
+            bullets.append(f"{emoji} **유입단가 {_won(last['유입단가'])}** ({ld}) — {pdt} 대비 "
+                           f"{abs(dc):.0f}% {word} ({_won(prev['유입단가'])} → {_won(last['유입단가'])})")
+            di = last["유입"] - prev["유입"]
+            if dc < 0:
+                comment = ("#ecfdf5", "#a7f3d0", "#065f46",
+                           f"✅ {ld} 유입단가가 {pdt} 대비 {abs(dc):.0f}% 개선 (유입 {di:+.0f}) — 자동조치가 효율 방향으로 작동 중.")
+            else:
+                comment = ("#fffbeb", "#fde68a", "#92400e",
+                           f"⚠️ {ld} 유입단가가 {pdt} 대비 {dc:.0f}% 상승 — 상향 조치 과다/하향 대상 점검 권장.")
         else:
             bullets.append(f"**유입단가 {_won(last['유입단가'])}** ({ld} 기준)")
         bullets.append(f"💰 ({ld}) 비용 **{_won(last['비용'])}** · 유입 **{last['유입']:,.0f}** · "
@@ -451,25 +461,20 @@ with st.container(border=True):
         vc = filt(sug)["_dir"].value_counts()
         bullets.append(f"⚙️ 현재 조치 제안: 상향 **{int(vc.get('상향',0))}** · "
                        f"하향 **{int(vc.get('하향',0))}** · OFF **{int(vc.get('OFF',0))}**")
-    # 한 블록으로 렌더 → 줄 간격 촘촘하게 (**bold** → <b>)
-    if bullets:
-        html_lines = "".join(
-            "• " + re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", b) + "<br>" for b in bullets)
-        st.markdown(
-            f"<div style='line-height:1.55;font-size:14px;margin:2px 0 6px'>{html_lines}</div>",
-            unsafe_allow_html=True)
-    # 성과 방향 코멘트 (유입단가 = 비용/유입)
-    if not daily.empty and len(daily) >= 2:
-        last, prev = daily.iloc[-1], daily.iloc[-2]
-        ld, pdt = f"{last['날짜']:%m-%d}", f"{prev['날짜']:%m-%d}"
-        if not pd.isna(last["유입단가"]) and not pd.isna(prev["유입단가"]) and prev["유입단가"]:
-            dc = (last["유입단가"] - prev["유입단가"]) / prev["유입단가"] * 100
-            di = last["유입"] - prev["유입"]
-            if dc < 0:
-                st.success(f"✅ {ld} 유입단가가 {pdt} 대비 {abs(dc):.0f}% 개선(유입 {di:+.0f}) — 자동조치가 효율 방향으로 작동 중.")
-            else:
-                st.warning(f"⚠️ {ld} 유입단가가 {pdt} 대비 {dc:.0f}% 상승 — 상향 조치가 과한지/하향 대상은 없는지 점검 권장.")
-    st.caption(f"현재 사이드바 필터(기기·랜딩·기간) 기준 · 비교: {base_dates or '—'} · 유입단가=비용/유입 · 정확도: 정확")
+
+    lines = "".join(f"<div style='margin:1px 0'>• {_b2h(b)}</div>" for b in bullets)
+    cmt = ""
+    if comment:
+        bg, bd, fg, txt = comment
+        cmt = (f"<div style='margin-top:9px;padding:8px 11px;border-radius:8px;background:{bg};"
+               f"border:1px solid {bd};color:{fg};font-size:12.5px;font-weight:600'>{txt}</div>")
+    st.markdown(
+        "<div style='font-size:13.5px;line-height:1.6;color:#0f172a'>"
+        "<div style='font-size:15px;font-weight:800;margin-bottom:7px'>💡 인사이트 &amp; 요약</div>"
+        f"{lines}{cmt}"
+        f"<div style='color:#94a3b8;font-size:11px;margin-top:8px'>현재 필터 기준 · "
+        f"비교 {base_dates or '—'} · 유입단가=비용/유입 · 정확도: 정확</div>"
+        "</div>", unsafe_allow_html=True)
 
 
 tab_now, tab_trend, tab_act, tab_kw, tab_log = st.tabs(
@@ -587,60 +592,8 @@ with tab_trend:
         st.info("표시할 데이터가 없습니다. 필터를 확인하세요.")
     else:
         DIM_LABEL = {"캠페인명": "캠페인", "광고그룹명": "광고그룹", "랜딩": "랜딩"}
-        # ── ① 기준별 비교 (선택 기간 합계) ──
-        st.markdown("##### 📊 기준별 성과 비교 (선택 기간 합계)")
-        cL, cR = st.columns([1, 3])
-        dimsel = cL.radio("비교 기준", list(DIM_LABEL), format_func=lambda x: DIM_LABEL[x])
-        metsel = cL.selectbox("일자별 추세 지표", ["유입단가", "비용", "유입", "방문단가"])
-        label = DIM_LABEL[dimsel]
-        agg = dim2f_range.groupby(dimsel, as_index=False).agg(
-            비용=("비용", "sum"), 클릭=("클릭", "sum"), 노출=("노출", "sum"),
-            방문=("방문", "sum"), 유입=("유입", "sum"))
-        agg["유입단가"] = (agg["비용"] / agg["유입"].replace(0, float("nan"))).round(0)
-        agg["방문단가"] = (agg["비용"] / agg["방문"].replace(0, float("nan"))).round(0)
-        agg = agg.sort_values("비용", ascending=False).head(12)
-        yax = alt.Y(f"{dimsel}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=220))
-        with cR:
-            st.altair_chart(alt.Chart(agg).mark_bar(color="#4f46e5").encode(
-                y=yax, x=alt.X("비용:Q", title="비용(원)"),
-                tooltip=[dimsel, "비용", "유입", "유입단가"]
-            ).properties(height=max(170, len(agg) * 28)), width="stretch")
-        b1, b2 = st.columns(2)
-        with b1:
-            st.markdown("**유입 (건)**")
-            st.altair_chart(alt.Chart(agg).mark_bar(color="#059669").encode(
-                y=alt.Y(f"{dimsel}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=180)),
-                x=alt.X("유입:Q"), tooltip=[dimsel, "유입"]
-            ).properties(height=max(150, len(agg) * 24)), width="stretch")
-        with b2:
-            st.markdown("**유입단가 (원, 낮을수록 좋음)**")
-            st.altair_chart(alt.Chart(agg[agg["유입단가"].notna()]).mark_bar(color="#dc2626").encode(
-                y=alt.Y(f"{dimsel}:N", sort="x", title=None, axis=alt.Axis(labelLimit=180)),
-                x=alt.X("유입단가:Q"), tooltip=[dimsel, "유입단가"]
-            ).properties(height=max(150, len(agg) * 24)), width="stretch")
-        st.caption(f"상위 12개 {label} · 비용/순위=네이버RAW · 방문/유입=로거(캠페인/그룹은 비용비례 배분·추정)")
 
-        st.divider()
-        # ── ② 일자별 (기준별 멀티라인) ──
-        st.markdown(f"##### 📈 일자별 {metsel} — {label} 상위 6 비교")
-        top_dims = agg.head(6)[dimsel].tolist()
-        dd = dim2f_range[dim2f_range[dimsel].isin(top_dims)].groupby(
-            ["날짜", dimsel], as_index=False).agg(
-            비용=("비용", "sum"), 방문=("방문", "sum"), 유입=("유입", "sum"))
-        dd["유입단가"] = (dd["비용"] / dd["유입"].replace(0, float("nan"))).round(0)
-        dd["방문단가"] = (dd["비용"] / dd["방문"].replace(0, float("nan"))).round(0)
-        dd["d"] = dd["날짜"].dt.strftime("%m-%d")
-        rev = (metsel in ("유입단가", "방문단가"))
-        st.altair_chart(alt.Chart(dd).mark_line(point=True).encode(
-            x=alt.X("d:O", title=None),
-            y=alt.Y(f"{metsel}:Q", title=metsel,
-                    scale=alt.Scale(reverse=False)),
-            color=alt.Color(f"{dimsel}:N", title=label, legend=alt.Legend(orient="bottom")),
-            tooltip=["d", dimsel, metsel]).properties(height=320), width="stretch")
-        st.caption(f"{label}별 일자 추세 · {metsel}" + (" (낮을수록 좋음)" if rev else ""))
-
-        st.divider()
-        # ── ③ 전체 합계 일자별 추세 ──
+        # ── ① 전체 합계 일자별 추세 (상단) ──
         st.markdown("##### 📉 전체 합계 일자별 추세 (현재 필터)")
         if len(daily) >= 2:
             d = daily.copy()
@@ -675,6 +628,72 @@ with tab_trend:
                     tooltip=["날짜", "평균순위"]).properties(height=240), width="stretch")
         else:
             st.info("전체 추세는 2일 이상 데이터가 필요합니다.")
+
+        st.divider()
+        # ── ② 기준별 성과 비교 (리더보드) ──
+        st.markdown("##### 🏆 기준별 성과 비교 — 어떤 캠페인/그룹이 잘 나오나 (선택 기간 합계)")
+        cc = st.columns(3)
+        dimsel = cc[0].radio("기준", list(DIM_LABEL), format_func=lambda x: DIM_LABEL[x], horizontal=False)
+        sortby = cc[1].radio("정렬", ["비용", "유입", "유입단가(효율)"], horizontal=False)
+        metsel = cc[2].selectbox("아래 일자추세 지표", ["유입단가", "비용", "유입", "방문단가"])
+        label = DIM_LABEL[dimsel]
+        agg = dim2f_range.groupby(dimsel, as_index=False).agg(
+            비용=("비용", "sum"), 클릭=("클릭", "sum"), 노출=("노출", "sum"),
+            방문=("방문", "sum"), 유입=("유입", "sum"))
+        agg["유입단가"] = (agg["비용"] / agg["유입"].replace(0, float("nan"))).round(0)
+        agg["방문단가"] = (agg["비용"] / agg["방문"].replace(0, float("nan"))).round(0)
+        agg["CTR"] = (agg["클릭"] / agg["노출"].replace(0, float("nan")) * 100).round(2)
+        target = agg["비용"].sum() / max(agg["유입"].sum(), 1)   # 평균 유입단가(효율 기준선)
+        # 정렬
+        if sortby == "유입단가(효율)":
+            board = agg.sort_values("유입단가", ascending=True, na_position="last")
+        else:
+            board = agg.sort_values(sortby, ascending=False)
+        board = board.head(15).reset_index(drop=True)
+        board.insert(0, "순위", range(1, len(board) + 1))
+        show = board[["순위", dimsel, "비용", "유입", "방문", "유입단가", "CTR"]].rename(columns={dimsel: label})
+
+        def ipc_color(col):
+            out = []
+            for v in col:
+                if pd.isna(v):
+                    out.append("color:#94a3b8")
+                elif v <= target:
+                    out.append("color:#059669;font-weight:700")
+                elif v <= target * 1.5:
+                    out.append("color:#334155")
+                else:
+                    out.append("color:#dc2626;font-weight:700")
+            return out
+
+        sty = (show.style
+               .bar(subset=["비용"], color="#c7d2fe", vmin=0)
+               .bar(subset=["유입"], color="#bbf7d0", vmin=0)
+               .apply(ipc_color, subset=["유입단가"])
+               .format({"비용": "₩{:,.0f}", "유입단가": "₩{:,.0f}", "방문": "{:,.0f}",
+                        "유입": "{:,.0f}", "CTR": "{:.2f}%"}, na_rep="-"))
+        st.dataframe(sty, hide_index=True, width="stretch",
+                     height=min(560, 44 + len(show) * 35))
+        st.caption(f"상위 15개 {label} · 비용·유입 = 막대 길이 · **유입단가 색**: 🟢평균이하(효율↑) / 🔴평균 1.5배↑ "
+                   f"(평균 ₩{target:,.0f}) · 방문/유입은 캠페인·그룹 시 비용비례 배분(추정)")
+
+        st.divider()
+        # ── ③ 일자별 (기준별 멀티라인) ──
+        st.markdown(f"##### 📈 일자별 {metsel} — {label} 상위 6 비교")
+        top_dims = agg.sort_values("비용", ascending=False).head(6)[dimsel].tolist()
+        dd = dim2f_range[dim2f_range[dimsel].isin(top_dims)].groupby(
+            ["날짜", dimsel], as_index=False).agg(
+            비용=("비용", "sum"), 방문=("방문", "sum"), 유입=("유입", "sum"))
+        dd["유입단가"] = (dd["비용"] / dd["유입"].replace(0, float("nan"))).round(0)
+        dd["방문단가"] = (dd["비용"] / dd["방문"].replace(0, float("nan"))).round(0)
+        dd["d"] = dd["날짜"].dt.strftime("%m-%d")
+        rev = (metsel in ("유입단가", "방문단가"))
+        st.altair_chart(alt.Chart(dd).mark_line(point=True).encode(
+            x=alt.X("d:O", title=None),
+            y=alt.Y(f"{metsel}:Q", title=metsel),
+            color=alt.Color(f"{dimsel}:N", title=label, legend=alt.Legend(orient="bottom")),
+            tooltip=["d", dimsel, metsel]).properties(height=320), width="stretch")
+        st.caption(f"비용 상위 6개 {label}의 일자별 {metsel}" + (" (낮을수록 좋음)" if rev else ""))
 
 
 # =============================================================================
