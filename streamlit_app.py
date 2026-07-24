@@ -466,8 +466,8 @@ with st.container():
     cmt = ""
     if comment:
         bg, bd, fg, txt = comment
-        cmt = (f"<div style='margin:8px 0 2px;padding:7px 11px;border-radius:6px;background:{bg};"
-               f"border-left:4px solid {fg};color:{fg};font-size:12.5px;font-weight:600'>{txt}</div>")
+        cmt = (f"<div style='margin:8px 0 0;padding:8px 12px;border-radius:8px;background:{bg};"
+               f"color:{fg};font-size:12.5px;font-weight:600'>{txt}</div>")
     st.markdown(
         "<div style='font-size:13.5px;line-height:1.6;color:#0f172a;"
         "border:1px solid #e2e8f0;border-radius:12px;padding:14px 16px;background:#fff'>"
