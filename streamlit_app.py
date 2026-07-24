@@ -366,23 +366,29 @@ def _won(v):
 with st.container(border=True):
     st.markdown("#### 💡 인사이트 & 요약")
     bullets = []
+    base_dates = ""
     if not daily.empty:
         last = daily.iloc[-1]
         prev = daily.iloc[-2] if len(daily) >= 2 else None
+        ld = f"{last['날짜']:%m-%d}"
+        pdt = f"{prev['날짜']:%m-%d}" if prev is not None else None
+        if pdt:
+            base_dates = f"{ld} vs {pdt}"
         if prev is not None and not pd.isna(last["유입단가"]) and not pd.isna(prev["유입단가"]) and prev["유입단가"]:
             dc = (last["유입단가"] - prev["유입단가"]) / prev["유입단가"] * 100
             emoji, word = ("🟢", "개선") if dc < 0 else ("🔴", "상승")
-            bullets.append(f"{emoji} **유입단가 {_won(last['유입단가'])}** — 전일 대비 {abs(dc):.0f}% {word} "
-                           f"({_won(prev['유입단가'])} → {_won(last['유입단가'])})")
+            bullets.append(f"{emoji} **유입단가 {_won(last['유입단가'])}** ({ld} 기준) — "
+                           f"{pdt} 대비 {abs(dc):.0f}% {word} "
+                           f"({pdt} {_won(prev['유입단가'])} → {ld} {_won(last['유입단가'])})")
         else:
-            bullets.append(f"**유입단가 {_won(last['유입단가'])}** (기준일 {last['날짜'].date()})")
-        bullets.append(f"💰 비용 **{_won(last['비용'])}** · 유입 **{last['유입']:,.0f}** · "
+            bullets.append(f"**유입단가 {_won(last['유입단가'])}** ({ld} 기준)")
+        bullets.append(f"💰 ({ld}) 비용 **{_won(last['비용'])}** · 유입 **{last['유입']:,.0f}** · "
                        f"방문 **{last['방문']:,.0f}** · 방문단가 **{_won(last['방문단가'])}** · "
                        f"평균순위 **{last['평균순위']:.1f}위**")
         latest_d = nvf["날짜"].max()
         lb = nvf[nvf["날짜"] == latest_d].groupby("랜딩")["총비용"].sum().sort_values(ascending=False)
         if len(lb):
-            bullets.append(f"🎯 비용 최다 랜딩: **{lb.index[0]}** ({_won(lb.iloc[0])})")
+            bullets.append(f"🎯 ({latest_d:%m-%d}) 비용 최다 랜딩: **{lb.index[0]}** ({_won(lb.iloc[0])})")
     if not sug.empty and "_dir" in sug.columns:
         vc = filt(sug)["_dir"].value_counts()
         bullets.append(f"⚙️ 현재 조치 제안: 상향 **{int(vc.get('상향',0))}** · "
@@ -392,18 +398,19 @@ with st.container(border=True):
     # 성과 방향 코멘트 (유입단가 = 비용/유입)
     if not daily.empty and len(daily) >= 2:
         last, prev = daily.iloc[-1], daily.iloc[-2]
+        ld, pdt = f"{last['날짜']:%m-%d}", f"{prev['날짜']:%m-%d}"
         if not pd.isna(last["유입단가"]) and not pd.isna(prev["유입단가"]) and prev["유입단가"]:
             dc = (last["유입단가"] - prev["유입단가"]) / prev["유입단가"] * 100
             di = last["유입"] - prev["유입"]
             if dc < 0:
-                st.success(f"✅ 유입단가가 전일 대비 {abs(dc):.0f}% 개선(유입 {di:+.0f}) — 자동조치가 효율 방향으로 작동 중.")
+                st.success(f"✅ {ld} 유입단가가 {pdt} 대비 {abs(dc):.0f}% 개선(유입 {di:+.0f}) — 자동조치가 효율 방향으로 작동 중.")
             else:
-                st.warning(f"⚠️ 유입단가가 전일 대비 {dc:.0f}% 상승 — 상향 조치가 과한지/하향 대상은 없는지 점검 권장.")
-    st.caption("현재 사이드바 필터(기기·랜딩·기간) 기준 · 확정일 전일 대비 · 유입단가=비용/유입 · 정확도: 정확")
+                st.warning(f"⚠️ {ld} 유입단가가 {pdt} 대비 {dc:.0f}% 상승 — 상향 조치가 과한지/하향 대상은 없는지 점검 권장.")
+    st.caption(f"현재 사이드바 필터(기기·랜딩·기간) 기준 · 비교: {base_dates or '—'} · 유입단가=비용/유입 · 정확도: 정확")
 
 
 tab_now, tab_trend, tab_act, tab_kw, tab_log = st.tabs(
-    ["① 현황(오늘·어제)", "② 추세", "③ 자동조치", "④ 키워드", "⑤ 로그·설정"])
+    ["① 현황(당일·확정일)", "② 추세", "③ 자동조치", "④ 키워드", "⑤ 로그·설정"])
 
 
 # =============================================================================
@@ -417,7 +424,7 @@ with tab_now:
     today_actual = datetime.now().date()
 
     # 오늘(진행중): 방문/유입=로거 intraday 최신 스냅샷, 비용/클릭/순위=네이버14시
-    st.subheader("오늘 · 진행중")
+    st.subheader(f"진행중 · 당일 {today_actual}")
     lgi = filt(lg_intra)
     v_today = o_today = None
     v_date = None
@@ -463,7 +470,10 @@ with tab_now:
     st.caption(" · ".join(notes) + " · 진행중(정확도: 각 시점 누적 기준)")
 
     st.divider()
-    st.subheader(f"어제 · 확정 ({conf_day})")
+    _prev_day = daily.iloc[-2]["날짜"] if len(daily) >= 2 else None
+    _pd_str = f"{_prev_day:%m-%d}" if _prev_day is not None else "—"
+    st.subheader(f"확정일 {conf_day}"
+                 + (f"  (직전일 {_pd_str} 대비)" if _prev_day is not None else ""))
     if len(daily) >= 1:
         last = daily.iloc[-1]
         prev = daily.iloc[-2] if len(daily) >= 2 else None
@@ -483,7 +493,7 @@ with tab_now:
         c2[1].metric("방문단가", money(last["방문단가"]), d("방문단가"), delta_color="inverse")
         c2[2].metric("평균순위", f"{last['평균순위']:.1f}위", d("평균순위"), delta_color="inverse")
         c2[3].metric("CTR", f"{last['CTR']:.2f}%", d("CTR"))
-        st.caption("전일 대비 · 비용=네이버RAW, 방문/유입=로거RAW · 유입단가=비용/유입 · 정확도: 정확")
+        st.caption(f"증감%는 {_pd_str} 대비 · 비용=네이버RAW, 방문/유입=로거RAW · 유입단가=비용/유입 · 정확도: 정확")
 
 
 # =============================================================================
