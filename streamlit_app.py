@@ -360,7 +360,7 @@ h[3].caption(f"👀 화면갱신: {datetime.now():%H:%M:%S}")
 # 💡 상단 인사이트 & 요약 (현재 필터 기준)
 # =============================================================================
 def _won(v):
-    return "—" if v is None or pd.isna(v) else f"₩{v:,.0f}"
+    return "-" if v is None or pd.isna(v) else f"₩{v:,.0f}"
 
 
 with st.container(border=True):
@@ -393,8 +393,13 @@ with st.container(border=True):
         vc = filt(sug)["_dir"].value_counts()
         bullets.append(f"⚙️ 현재 조치 제안: 상향 **{int(vc.get('상향',0))}** · "
                        f"하향 **{int(vc.get('하향',0))}** · OFF **{int(vc.get('OFF',0))}**")
-    for b in bullets:
-        st.markdown(f"- {b}")
+    # 한 블록으로 렌더 → 줄 간격 촘촘하게 (**bold** → <b>)
+    if bullets:
+        html_lines = "".join(
+            "• " + re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", b) + "<br>" for b in bullets)
+        st.markdown(
+            f"<div style='line-height:1.55;font-size:14px;margin:2px 0 6px'>{html_lines}</div>",
+            unsafe_allow_html=True)
     # 성과 방향 코멘트 (유입단가 = 비용/유입)
     if not daily.empty and len(daily) >= 2:
         last, prev = daily.iloc[-1], daily.iloc[-2]
@@ -417,7 +422,7 @@ tab_now, tab_trend, tab_act, tab_kw, tab_log = st.tabs(
 # ① 현황
 # =============================================================================
 def money(v):
-    return "—" if v is None or pd.isna(v) else f"₩{v:,.0f}"
+    return "-" if v is None or pd.isna(v) else f"₩{v:,.0f}"
 
 
 with tab_now:
@@ -428,6 +433,7 @@ with tab_now:
     lgi = filt(lg_intra)
     v_today = o_today = None
     v_date = None
+    latest_hour = None
     if not lgi.empty:
         v_date = lgi["날짜"].max()
         day_rows = lgi[lgi["날짜"] == v_date]
@@ -448,6 +454,23 @@ with tab_now:
         rank_today = (nr["평균노출순위"] * nr["노출수"]).sum() / max(nr["노출수"].sum(), 1)
 
     same_day = (v_date is not None and n14_date is not None and v_date == n14_date)
+
+    # ── 오늘 데이터 반영 상태 배지 ──
+    naver_ok = (n14_date is not None and n14_date.date() == today_actual)
+    logger_ok = (v_date is not None and v_date.date() == today_actual)
+    lg_h = f" {latest_hour}" if latest_hour else ""
+    n14_d = n14_date.date() if n14_date is not None else "-"
+    v_d = v_date.date() if v_date is not None else "-"
+    if naver_ok and logger_ok:
+        st.success(f"✅ 오늘({today_actual}) 반영 완료 — 네이버 14시 수집 완료 · 로거 최신 스냅샷{lg_h}")
+    elif logger_ok and not naver_ok:
+        st.warning(f"⏳ 네이버 14시 수집 전 — 비용·클릭·순위는 아직 **직전일({n14_d})** 기준 "
+                   f"(매일 14시경 반영). 방문·유입은 로거 오늘{lg_h} 반영됨.")
+    elif naver_ok and not logger_ok:
+        st.warning(f"⏳ 로거 오늘 스냅샷 대기 — 방문·유입은 **직전 수집({v_d})** 기준. 비용은 네이버 오늘 14시 반영됨.")
+    else:
+        st.warning(f"⏳ 오늘 데이터 반영 전 — 비용은 직전일({n14_d}) 네이버, 방문·유입은 직전({v_d}) 로거 기준. 수집되면 자동 갱신.")
+
     c = st.columns(4)
     c[0].metric("총비용(당일14시)", money(c_today))
     c[1].metric("유입(로거 최신)", "—" if o_today is None else f"{o_today:,.0f}")
@@ -587,7 +610,7 @@ with tab_act:
         fmt = {"현재입찰가": "₩{:,.0f}", "제안입찰가": "₩{:,.0f}", "변화율": "{:+.0f}%"}
         if ind_col:
             fmt[ind_col] = "₩{:,.0f}"
-        sty = sv.style.apply(color, axis=1).format(fmt, na_rep="—")
+        sty = sv.style.apply(color, axis=1).format(fmt, na_rep="-")
         st.dataframe(sty, width="stretch", hide_index=True, height=420)
         st.caption(f"파랑=상향 · 빨강=하향 · 분류=조치 사유 · 지표={ind_col or '—'} · 비용순 상위 120 · 정확도: 정확(제안 원본)")
 
@@ -655,10 +678,13 @@ with tab_kw:
                   "평균순위", "방문", "유입", "유입단가", "점검"]].sort_values("총비용", ascending=False)
         if only:
             view = view[view["점검"].isin(["🔴 OFF후보", "🟠 상위·성과無", "🟠 유입단가높음"])]
-        st.dataframe(view, width="stretch", hide_index=True, height=460, column_config={
-            "총비용": st.column_config.NumberColumn(format="₩%d"),
-            "유입단가": st.column_config.NumberColumn(format="₩%d"),
-            "현재입찰가": st.column_config.NumberColumn(format="₩%d")})
+        # NaN(유입 0 → 유입단가 계산 불가)은 "-"로 표시
+        sty = view.style.format({
+            "현재입찰가": "₩{:,.0f}", "총비용": "₩{:,.0f}", "유입단가": "₩{:,.0f}",
+            "노출수": "{:,.0f}", "클릭수": "{:,.0f}", "방문": "{:,.0f}",
+            "유입": "{:,.0f}", "평균순위": "{:.1f}",
+        }, na_rep="-")
+        st.dataframe(sty, width="stretch", hide_index=True, height=460)
         st.caption(f"기준일 {latest.date()} · 목표 유입단가 참고 ₩{target:,.0f} · "
                    f"비용=네이버RAW, 방문/유입=로거(키워드+기기 1회 조인) · 유입단가=비용/유입 · 정확도: 정확")
 
