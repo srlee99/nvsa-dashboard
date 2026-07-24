@@ -471,9 +471,10 @@ with st.container(border=True):
     st.markdown(
         "<div style='font-size:13.5px;line-height:1.6;color:#0f172a'>"
         "<div style='font-size:15px;font-weight:800;margin-bottom:7px'>💡 인사이트 &amp; 요약</div>"
-        f"{lines}{cmt}"
-        f"<div style='color:#94a3b8;font-size:11px;margin-top:8px'>현재 필터 기준 · "
+        f"{lines}"
+        f"<div style='color:#94a3b8;font-size:11px;margin:4px 0 2px'>현재 필터 기준 · "
         f"비교 {base_dates or '—'} · 유입단가=비용/유입 · 정확도: 정확</div>"
+        f"{cmt}"
         "</div>", unsafe_allow_html=True)
 
 
