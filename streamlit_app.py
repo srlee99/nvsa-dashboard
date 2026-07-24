@@ -262,9 +262,9 @@ def build_daily(nv: pd.DataFrame, lg: pd.DataFrame) -> pd.DataFrame:
     for c in ["비용", "클릭", "노출", "방문", "주문"]:
         if c in d:
             d[c] = d[c].fillna(0)
-    d["CPA"] = (d["비용"] / d["주문"].replace(0, pd.NA)).round(0)
-    d["유입단가"] = (d["비용"] / d["방문"].replace(0, pd.NA)).round(0)
-    d["CTR"] = (d["클릭"] / d["노출"].replace(0, pd.NA) * 100).round(2)
+    d["CPA"] = (d["비용"] / d["주문"].replace(0, float("nan"))).round(0)
+    d["유입단가"] = (d["비용"] / d["방문"].replace(0, float("nan"))).round(0)
+    d["CTR"] = (d["클릭"] / d["노출"].replace(0, float("nan")) * 100).round(2)
     return d
 
 
@@ -508,7 +508,7 @@ with tab_act:
             sv = sv[sv["_dir"].isin(pick)]
         if "제안입찰가" in sv.columns and "현재입찰가" in sv.columns:
             sv["변화율"] = ((sv["제안입찰가"] - sv["현재입찰가"]) /
-                          sv["현재입찰가"].replace(0, pd.NA) * 100).round(0)
+                          sv["현재입찰가"].replace(0, float("nan")) * 100).round(0)
         if "총비용" in sv.columns:
             sv = sv.sort_values("총비용", ascending=False)
         cols = [c for c in ["키워드", "기기", "랜딩", "캠페인명", "현재입찰가", "제안입찰가", "변화율",
@@ -574,7 +574,7 @@ with tab_kw:
             방문=("방문", "sum"), 주문=("주문", "sum")).reset_index()
         k = nk.merge(lgk, on=["키워드", "기기"], how="left")
         k[["방문", "주문"]] = k[["방문", "주문"]].fillna(0)
-        k["CPA"] = (k["총비용"] / k["주문"].replace(0, pd.NA)).round(0)
+        k["CPA"] = (k["총비용"] / k["주문"].replace(0, float("nan"))).round(0)
 
         tot_cost = daily.iloc[-1]["비용"] if len(daily) else 0
         tot_ord = daily.iloc[-1]["주문"] if len(daily) else 0
