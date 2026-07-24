@@ -5,8 +5,8 @@
 
 데이터 소스 원칙 (⚠️ 중요):
   · 비용·클릭·노출·순위 → '네이버SA RAW'  (키워드×캠페인×일자, 누적)
-  · 방문·주문          → 'CTS_LOGGER_Daily_RAW'  (키워드×랜딩×일자, 전환 진실값)
-  · CPA=비용/주문, 유입단가=비용/방문  (일 단위 집계 후 계산)
+  · 방문·유입          → 'CTS_LOGGER_Daily_RAW'  (키워드×랜딩×일자, 전환 진실값)
+  · 유입단가=비용/유입, 방문단가=비용/방문  (일 단위 집계 후 계산. C19_최종-주문횟수=유입)
   · Mapped_Daily/Today 는 '전일 최근14일 누적 + 캠페인 팬아웃'이라 합산 금지.
     → 키워드 드릴다운·조치 뷰에서만, 그것도 (키워드+기기) 1회 조인으로 사용.
 
@@ -110,7 +110,7 @@ def load_naver(tab: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner="로거 전환 가공 중...")
 def load_logger_daily() -> pd.DataFrame:
-    """CTS_LOGGER_Daily_RAW — 방문·주문 (전환 진실값, 일자별)."""
+    """CTS_LOGGER_Daily_RAW — 방문·유입 (전환 진실값, 일자별)."""
     df = load_tab("CTS_LOGGER_Daily_RAW")
     if df.empty:
         return df
@@ -122,14 +122,14 @@ def load_logger_daily() -> pd.DataFrame:
         "기기": [logger_device(x) for x in df.get("C3_매체/프로그램", "")],
         "랜딩": [LOGGER_LANDING.get(str(g).strip(), "기타") for g in df.get("group", "")],
         "방문": num(df[vcol]) if vcol else 0,
-        "주문": num(df[ocol]) if ocol else 0,
+        "유입": num(df[ocol]) if ocol else 0,  # C19_최종-주문횟수 = 유입(전환) 지표
     }).dropna(subset=["날짜"])
     return out
 
 
 @st.cache_data(ttl=CACHE_TTL)
 def load_logger_intraday() -> pd.DataFrame:
-    """CTS_LOGGER_RAW — 당일 30분 스냅샷 (오늘 진행중 방문·주문)."""
+    """CTS_LOGGER_RAW — 당일 30분 스냅샷 (오늘 진행중 방문·유입)."""
     df = load_tab("CTS_LOGGER_RAW")
     if df.empty:
         return df
@@ -142,7 +142,7 @@ def load_logger_intraday() -> pd.DataFrame:
         "기기": [logger_device(x) for x in df.get("C3_매체/프로그램", "")],
         "랜딩": [LOGGER_LANDING.get(str(g).strip(), "기타") for g in df.get("group", "")],
         "방문": num(df[vcol]) if vcol else 0,
-        "주문": num(df[ocol]) if ocol else 0,
+        "유입": num(df[ocol]) if ocol else 0,  # C19_최종-주문횟수 = 유입(전환) 지표
     }).dropna(subset=["날짜"])
     return out
 
@@ -251,7 +251,7 @@ def naver_daily(nv: pd.DataFrame) -> pd.DataFrame:
 def logger_daily_agg(lg: pd.DataFrame) -> pd.DataFrame:
     if lg.empty:
         return pd.DataFrame()
-    return lg.groupby("날짜").agg(방문=("방문", "sum"), 주문=("주문", "sum")).reset_index()
+    return lg.groupby("날짜").agg(방문=("방문", "sum"), 유입=("유입", "sum")).reset_index()
 
 
 def build_daily(nv: pd.DataFrame, lg: pd.DataFrame) -> pd.DataFrame:
@@ -259,11 +259,12 @@ def build_daily(nv: pd.DataFrame, lg: pd.DataFrame) -> pd.DataFrame:
     if n.empty and l.empty:
         return pd.DataFrame()
     d = n.merge(l, on="날짜", how="outer").sort_values("날짜") if not l.empty else n
-    for c in ["비용", "클릭", "노출", "방문", "주문"]:
+    for c in ["비용", "클릭", "노출", "방문", "유입"]:
         if c in d:
             d[c] = d[c].fillna(0)
-    d["CPA"] = (d["비용"] / d["주문"].replace(0, float("nan"))).round(0)
-    d["유입단가"] = (d["비용"] / d["방문"].replace(0, float("nan"))).round(0)
+    # 유입단가 = 비용/유입, 방문단가 = 비용/방문
+    d["유입단가"] = (d["비용"] / d["유입"].replace(0, float("nan"))).round(0)
+    d["방문단가"] = (d["비용"] / d["방문"].replace(0, float("nan"))).round(0)
     d["CTR"] = (d["클릭"] / d["노출"].replace(0, float("nan")) * 100).round(2)
     return d
 
@@ -351,8 +352,55 @@ run_last = runlog["run_at"].max() if not runlog.empty else None
 h = st.columns(4)
 h[0].caption(f"📅 최신 확정일: **{conf_day}**")
 h[1].caption(f"🤖 마지막 입찰실행: **{run_last:%m-%d %H:%M}**" if run_last is not None else "실행로그 없음")
-h[2].caption("💰비용=네이버RAW · 👣방문/주문=로거RAW")
+h[2].caption("💰비용=네이버RAW · 👣방문/유입=로거RAW")
 h[3].caption(f"👀 화면갱신: {datetime.now():%H:%M:%S}")
+
+
+# =============================================================================
+# 💡 상단 인사이트 & 요약 (현재 필터 기준)
+# =============================================================================
+def _won(v):
+    return "—" if v is None or pd.isna(v) else f"₩{v:,.0f}"
+
+
+with st.container(border=True):
+    st.markdown("#### 💡 인사이트 & 요약")
+    bullets = []
+    if not daily.empty:
+        last = daily.iloc[-1]
+        prev = daily.iloc[-2] if len(daily) >= 2 else None
+        if prev is not None and not pd.isna(last["유입단가"]) and not pd.isna(prev["유입단가"]) and prev["유입단가"]:
+            dc = (last["유입단가"] - prev["유입단가"]) / prev["유입단가"] * 100
+            emoji, word = ("🟢", "개선") if dc < 0 else ("🔴", "상승")
+            bullets.append(f"{emoji} **유입단가 {_won(last['유입단가'])}** — 전일 대비 {abs(dc):.0f}% {word} "
+                           f"({_won(prev['유입단가'])} → {_won(last['유입단가'])})")
+        else:
+            bullets.append(f"**유입단가 {_won(last['유입단가'])}** (기준일 {last['날짜'].date()})")
+        bullets.append(f"💰 비용 **{_won(last['비용'])}** · 유입 **{last['유입']:,.0f}** · "
+                       f"방문 **{last['방문']:,.0f}** · 방문단가 **{_won(last['방문단가'])}** · "
+                       f"평균순위 **{last['평균순위']:.1f}위**")
+        latest_d = nvf["날짜"].max()
+        lb = nvf[nvf["날짜"] == latest_d].groupby("랜딩")["총비용"].sum().sort_values(ascending=False)
+        if len(lb):
+            bullets.append(f"🎯 비용 최다 랜딩: **{lb.index[0]}** ({_won(lb.iloc[0])})")
+    if not sug.empty and "_dir" in sug.columns:
+        vc = filt(sug)["_dir"].value_counts()
+        bullets.append(f"⚙️ 현재 조치 제안: 상향 **{int(vc.get('상향',0))}** · "
+                       f"하향 **{int(vc.get('하향',0))}** · OFF **{int(vc.get('OFF',0))}**")
+    for b in bullets:
+        st.markdown(f"- {b}")
+    # 성과 방향 코멘트 (유입단가 = 비용/유입)
+    if not daily.empty and len(daily) >= 2:
+        last, prev = daily.iloc[-1], daily.iloc[-2]
+        if not pd.isna(last["유입단가"]) and not pd.isna(prev["유입단가"]) and prev["유입단가"]:
+            dc = (last["유입단가"] - prev["유입단가"]) / prev["유입단가"] * 100
+            di = last["유입"] - prev["유입"]
+            if dc < 0:
+                st.success(f"✅ 유입단가가 전일 대비 {abs(dc):.0f}% 개선(유입 {di:+.0f}) — 자동조치가 효율 방향으로 작동 중.")
+            else:
+                st.warning(f"⚠️ 유입단가가 전일 대비 {dc:.0f}% 상승 — 상향 조치가 과한지/하향 대상은 없는지 점검 권장.")
+    st.caption("현재 사이드바 필터(기기·랜딩·기간) 기준 · 확정일 전일 대비 · 유입단가=비용/유입 · 정확도: 정확")
+
 
 tab_now, tab_trend, tab_act, tab_kw, tab_log = st.tabs(
     ["① 현황(오늘·어제)", "② 추세", "③ 자동조치", "④ 키워드", "⑤ 로그·설정"])
@@ -368,7 +416,7 @@ def money(v):
 with tab_now:
     today_actual = datetime.now().date()
 
-    # 오늘(진행중): 방문/주문=로거 intraday 최신 스냅샷, 비용/클릭/순위=네이버14시
+    # 오늘(진행중): 방문/유입=로거 intraday 최신 스냅샷, 비용/클릭/순위=네이버14시
     st.subheader("오늘 · 진행중")
     lgi = filt(lg_intra)
     v_today = o_today = None
@@ -380,7 +428,7 @@ with tab_now:
         if "시각" in day_rows and day_rows["시각"].notna().any():
             latest_hour = day_rows["시각"].max()
             day_rows = day_rows[day_rows["시각"] == latest_hour]
-        v_today, o_today = day_rows["방문"].sum(), day_rows["주문"].sum()
+        v_today, o_today = day_rows["방문"].sum(), day_rows["유입"].sum()
 
     nv14 = filt(nv_14)
     c_today = clk_today = rank_today = None
@@ -395,23 +443,23 @@ with tab_now:
     same_day = (v_date is not None and n14_date is not None and v_date == n14_date)
     c = st.columns(4)
     c[0].metric("총비용(당일14시)", money(c_today))
-    c[1].metric("주문(로거 최신)", "—" if o_today is None else f"{o_today:,.0f}")
+    c[1].metric("유입(로거 최신)", "—" if o_today is None else f"{o_today:,.0f}")
     c[2].metric("방문(로거 최신)", "—" if v_today is None else f"{v_today:,.0f}")
     c[3].metric("클릭(당일14시)", "—" if clk_today is None else f"{clk_today:,.0f}")
     c2 = st.columns(4)
-    cpa_t = (c_today / o_today) if (same_day and o_today) else None
-    ipc_t = (c_today / v_today) if (same_day and v_today) else None
-    c2[0].metric("CPA", money(cpa_t))
-    c2[1].metric("유입단가", money(ipc_t))
+    ipc_t = (c_today / o_today) if (same_day and o_today) else None   # 유입단가=비용/유입
+    vpc_t = (c_today / v_today) if (same_day and v_today) else None   # 방문단가=비용/방문
+    c2[0].metric("유입단가", money(ipc_t))
+    c2[1].metric("방문단가", money(vpc_t))
     c2[2].metric("평균순위(14시)", "—" if rank_today is None else f"{rank_today:.1f}위")
     c2[3].metric("클릭률", "—" if not clk_today else f"{clk_today/max(nr['노출수'].sum(),1)*100:.2f}%")
     notes = []
     if v_date is not None:
-        notes.append(f"방문/주문 = 로거 {v_date.date()} 최신 스냅샷")
+        notes.append(f"방문/유입 = 로거 {v_date.date()} 최신 스냅샷")
     if n14_date is not None:
         notes.append(f"비용/클릭 = 네이버 {n14_date.date()} 14시")
     if not same_day:
-        notes.append("⚠️ 네이버 당일 14시 수집 전이라 비용·방문 날짜가 달라 CPA는 14시 이후 계산")
+        notes.append("⚠️ 네이버 당일 14시 수집 전이라 비용·유입 날짜가 달라 유입단가는 14시 이후 계산")
     st.caption(" · ".join(notes) + " · 진행중(정확도: 각 시점 누적 기준)")
 
     st.divider()
@@ -427,15 +475,15 @@ with tab_now:
 
         c = st.columns(4)
         c[0].metric("총비용", f"₩{last['비용']:,.0f}", d("비용"))
-        c[1].metric("주문", f"{last['주문']:,.0f}", d("주문"))
+        c[1].metric("유입", f"{last['유입']:,.0f}", d("유입"))
         c[2].metric("방문", f"{last['방문']:,.0f}", d("방문"))
         c[3].metric("클릭", f"{last['클릭']:,.0f}", d("클릭"))
         c2 = st.columns(4)
-        c2[0].metric("CPA", money(last["CPA"]), d("CPA"), delta_color="inverse")
-        c2[1].metric("유입단가", money(last["유입단가"]), d("유입단가"), delta_color="inverse")
+        c2[0].metric("유입단가", money(last["유입단가"]), d("유입단가"), delta_color="inverse")
+        c2[1].metric("방문단가", money(last["방문단가"]), d("방문단가"), delta_color="inverse")
         c2[2].metric("평균순위", f"{last['평균순위']:.1f}위", d("평균순위"), delta_color="inverse")
         c2[3].metric("CTR", f"{last['CTR']:.2f}%", d("CTR"))
-        st.caption("전일 대비 · 비용=네이버RAW, 방문/주문=로거RAW · 정확도: 정확")
+        st.caption("전일 대비 · 비용=네이버RAW, 방문/유입=로거RAW · 유입단가=비용/유입 · 정확도: 정확")
 
 
 # =============================================================================
@@ -447,32 +495,35 @@ with tab_trend:
         d["날짜"] = d["날짜"].dt.strftime("%m-%d")
         r1 = st.columns(2)
         with r1[0]:
-            st.markdown("**비용 & 주문**")
+            st.markdown("**비용 & 유입**")
             base = alt.Chart(d).encode(x=alt.X("날짜:O", title=None))
             st.altair_chart(alt.layer(
                 base.mark_bar(color="#c7d2fe").encode(y=alt.Y("비용:Q", title="비용(원)")),
-                base.mark_line(point=True, color="#4f46e5").encode(y=alt.Y("주문:Q", title="주문")),
+                base.mark_line(point=True, color="#4f46e5").encode(y=alt.Y("유입:Q", title="유입")),
             ).resolve_scale(y="independent").properties(height=240), width="stretch")
+            st.caption("얼마 써서 유입(전환) 몇 건 나왔나")
         with r1[1]:
-            st.markdown("**CPA 추세 (낮을수록 좋음)**")
+            st.markdown("**유입단가 추세 (비용÷유입, 낮을수록 좋음)**")
             st.altair_chart(alt.Chart(d).mark_line(point=True, color="#dc2626").encode(
-                x=alt.X("날짜:O", title=None), y=alt.Y("CPA:Q", title="CPA(원)"),
-                tooltip=["날짜", "CPA"]).properties(height=240), width="stretch")
+                x=alt.X("날짜:O", title=None), y=alt.Y("유입단가:Q", title="유입단가(원)"),
+                tooltip=["날짜", "유입단가"]).properties(height=240), width="stretch")
+            st.caption("유입 1건 만드는 데 든 비용 — 핵심 효율 지표")
         r2 = st.columns(2)
         with r2[0]:
-            st.markdown("**방문 & 유입단가**")
+            st.markdown("**방문 & 방문단가 (비용÷방문)**")
             base = alt.Chart(d).encode(x=alt.X("날짜:O", title=None))
             st.altair_chart(alt.layer(
                 base.mark_bar(color="#bbf7d0").encode(y=alt.Y("방문:Q", title="방문")),
-                base.mark_line(point=True, color="#059669").encode(y=alt.Y("유입단가:Q", title="유입단가(원)")),
+                base.mark_line(point=True, color="#059669").encode(y=alt.Y("방문단가:Q", title="방문단가(원)")),
             ).resolve_scale(y="independent").properties(height=240), width="stretch")
+            st.caption("방문 볼륨과 방문 획득 효율 — 유입단가의 선행지표(방문이 유입보다 자주 발생)")
         with r2[1]:
             st.markdown("**평균 노출순위 (낮을수록 상위)**")
             st.altair_chart(alt.Chart(d).mark_line(point=True, color="#ea580c").encode(
                 x=alt.X("날짜:O", title=None),
                 y=alt.Y("평균순위:Q", title="순위", scale=alt.Scale(reverse=True)),
                 tooltip=["날짜", "평균순위"]).properties(height=240), width="stretch")
-        st.caption("비용/클릭/순위=네이버RAW · 방문/주문=로거RAW · 정확도: 정확")
+        st.caption("비용/클릭/순위=네이버RAW · 방문/유입=로거RAW · 정확도: 정확")
     else:
         st.info("추세를 그리려면 2일 이상 데이터가 필요합니다.")
 
@@ -555,7 +606,7 @@ with tab_act:
 
 
 # =============================================================================
-# ④ 키워드 (네이버 비용 + 로거 방문/주문, 키워드+기기 1회 조인)
+# ④ 키워드 (네이버 비용 + 로거 방문/유입, 키워드+기기 1회 조인)
 # =============================================================================
 with tab_kw:
     st.subheader("키워드 드릴다운 · 최신 확정일")
@@ -568,38 +619,38 @@ with tab_kw:
                 "평균순위": (x["평균노출순위"] * x["노출수"]).sum() / max(x["노출수"].sum(), 1),
                 "현재입찰가": x["현재입찰가"].max(),
             }), include_groups=False).reset_index()
-        # 로거 방문/주문 (같은 날, 키워드+기기 1회 조인 → 중복 없음)
+        # 로거 방문/유입 (같은 날, 키워드+기기 1회 조인 → 중복 없음)
         lgk = filt(lg_daily)
         lgk = lgk[lgk["날짜"] == latest].groupby(["키워드", "기기"]).agg(
-            방문=("방문", "sum"), 주문=("주문", "sum")).reset_index()
+            방문=("방문", "sum"), 유입=("유입", "sum")).reset_index()
         k = nk.merge(lgk, on=["키워드", "기기"], how="left")
-        k[["방문", "주문"]] = k[["방문", "주문"]].fillna(0)
-        k["CPA"] = (k["총비용"] / k["주문"].replace(0, float("nan"))).round(0)
+        k[["방문", "유입"]] = k[["방문", "유입"]].fillna(0)
+        k["유입단가"] = (k["총비용"] / k["유입"].replace(0, float("nan"))).round(0)
 
         tot_cost = daily.iloc[-1]["비용"] if len(daily) else 0
-        tot_ord = daily.iloc[-1]["주문"] if len(daily) else 0
-        tcpa = (tot_cost / tot_ord) if tot_ord else 0
+        tot_in = daily.iloc[-1]["유입"] if len(daily) else 0
+        target = (tot_cost / tot_in) if tot_in else 0   # 목표 유입단가 참고값
 
         def flag(r):
-            if r["주문"] == 0 and tcpa and r["총비용"] >= tcpa:
+            if r["유입"] == 0 and target and r["총비용"] >= target:
                 return "🔴 OFF후보"
-            if r["주문"] == 0 and r["평균순위"] <= 3 and r["총비용"] > 0:
+            if r["유입"] == 0 and r["평균순위"] <= 3 and r["총비용"] > 0:
                 return "🟠 상위·성과無"
-            if not pd.isna(r["CPA"]) and tcpa and r["CPA"] > tcpa * 1.6:
-                return "🟠 CPA높음"
-            return "🟢 주문有" if r["주문"] > 0 else ""
+            if not pd.isna(r["유입단가"]) and target and r["유입단가"] > target * 1.6:
+                return "🟠 유입단가높음"
+            return "🟢 유입有" if r["유입"] > 0 else ""
         k["점검"] = k.apply(flag, axis=1)
         only = st.checkbox("점검 필요만 보기", value=False)
         view = k[["키워드", "기기", "랜딩", "현재입찰가", "노출수", "클릭수", "총비용",
-                  "평균순위", "방문", "주문", "CPA", "점검"]].sort_values("총비용", ascending=False)
+                  "평균순위", "방문", "유입", "유입단가", "점검"]].sort_values("총비용", ascending=False)
         if only:
-            view = view[view["점검"].isin(["🔴 OFF후보", "🟠 상위·성과無", "🟠 CPA높음"])]
+            view = view[view["점검"].isin(["🔴 OFF후보", "🟠 상위·성과無", "🟠 유입단가높음"])]
         st.dataframe(view, width="stretch", hide_index=True, height=460, column_config={
             "총비용": st.column_config.NumberColumn(format="₩%d"),
-            "CPA": st.column_config.NumberColumn(format="₩%d"),
+            "유입단가": st.column_config.NumberColumn(format="₩%d"),
             "현재입찰가": st.column_config.NumberColumn(format="₩%d")})
-        st.caption(f"기준일 {latest.date()} · 목표CPA 참고 ₩{tcpa:,.0f} · "
-                   f"비용=네이버RAW, 방문/주문=로거(키워드+기기 1회 조인) · 정확도: 정확")
+        st.caption(f"기준일 {latest.date()} · 목표 유입단가 참고 ₩{target:,.0f} · "
+                   f"비용=네이버RAW, 방문/유입=로거(키워드+기기 1회 조인) · 유입단가=비용/유입 · 정확도: 정확")
 
 
 # =============================================================================
@@ -621,5 +672,5 @@ with tab_log:
                          width="stretch", hide_index=True, height=420)
 
 st.divider()
-st.caption("데이터: 자동입찰 시트 라이브 read (인증 없음) · 비용=네이버SA RAW · 방문/주문=CTS_LOGGER_Daily_RAW · "
+st.caption("데이터: 자동입찰 시트 라이브 read (인증 없음) · 비용=네이버SA RAW · 방문/유입=CTS_LOGGER_Daily_RAW · "
            "Mapped_*는 드릴다운/조치 전용 · 비용 단위 원(KRW)")
